@@ -25,12 +25,7 @@ import org.mapsforge.map.layer.queue.Job;
 import org.mapsforge.map.model.common.Observable;
 import org.mapsforge.map.model.common.Observer;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -337,6 +332,44 @@ public class FileSystemTileCache implements TileCache {
         this.observable.notifyObservers();
     }
 
+    public File putAndGet(Job key, TileBitmap bitmap) {
+        if (key == null) {
+            throw new IllegalArgumentException("key must not be null");
+        } else if (bitmap == null) {
+            throw new IllegalArgumentException("bitmap must not be null");
+        }
+
+        if (getCapacity() == 0) {
+            return null;
+        }
+
+        File file = storeData(key, bitmap);
+        this.observable.notifyObservers();
+        return file;
+    }
+
+    public PipedOutputStream putAndGetStream(Job key, TileBitmap bitmap) {
+        if (key == null) {
+            throw new IllegalArgumentException("key must not be null");
+        } else if (bitmap == null) {
+            throw new IllegalArgumentException("bitmap must not be null");
+        }
+
+        if (getCapacity() == 0) {
+            return null;
+        }
+
+        //File file = storeData(key, bitmap);
+        PipedOutputStream piped = storeDataStream(key, bitmap);
+        try {
+            bitmap.compress(piped);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        this.observable.notifyObservers();
+        return piped;
+    }
+
     @Override
     public void setWorkingSet(Set<Job> workingSet) {
         Set<String> workingSetInteger = new HashSet<String>();
@@ -360,7 +393,10 @@ public class FileSystemTileCache implements TileCache {
 
 
     private File getOutputFile(Job job) {
-        String file = this.cacheDirectory + File.separator + job.getKey();
+        //String file = this.cacheDirectory + File.separator + job.getKey();
+        int x = job.tile.tileX;
+        int y = job.tile.tileY;
+        String file = this.cacheDirectory + File.separator + x + ":" + y;
         String dir = file.substring(0, file.lastIndexOf(File.separatorChar));
         if (isValidCacheDirectory(new File(dir))) {
             return new File(file + FILE_EXTENSION);
@@ -378,21 +414,16 @@ public class FileSystemTileCache implements TileCache {
 
     }
 
-    /**
-     * stores the bitmap data on disk with filename key
-     *
-     * @param key    filename
-     * @param bitmap tile image
-     */
-    private void storeData(Job key, TileBitmap bitmap) {
-        OutputStream outputStream = null;
+    private PipedOutputStream storeDataStream(Job key, TileBitmap bitmap) {
+        PipedOutputStream outputStream = null;
         try {
             File file = getOutputFile(key);
             if (file == null) {
                 // if the file cannot be written, silently return
-                return;
+                return null;
             }
-            outputStream = new FileOutputStream(file);
+            //outputStream = new FileOutputStream(file);
+            outputStream = new PipedOutputStream();
             bitmap.compress(outputStream);
             try {
                 lock.writeLock().lock();
@@ -402,6 +433,7 @@ public class FileSystemTileCache implements TileCache {
             } finally {
                 lock.writeLock().unlock();
             }
+            return outputStream;
         } catch (Exception e) {
             // we are catching now any exception and then disable the file cache
             // this should ensure that no exception in the storage thread will
@@ -421,7 +453,54 @@ public class FileSystemTileCache implements TileCache {
         } finally {
             IOUtils.closeQuietly(outputStream);
         }
+        return null;
+    }
 
+    /**
+     * stores the bitmap data on disk with filename key
+     *
+     * @param key    filename
+     * @param bitmap tile image
+     */
+    private File storeData(Job key, TileBitmap bitmap) {
+        OutputStream outputStream = null;
+        try {
+            File file = getOutputFile(key);
+            if (file == null) {
+                // if the file cannot be written, silently return
+                return null;
+            }
+            outputStream = new FileOutputStream(file);
+            bitmap.compress(outputStream);
+            try {
+                lock.writeLock().lock();
+                if (this.lruCache.put(key.getKey(), file) != null) {
+                    LOGGER.warning("overwriting cached entry: " + key.getKey());
+                }
+            } finally {
+                lock.writeLock().unlock();
+            }
+            return file;
+        } catch (Exception e) {
+            // we are catching now any exception and then disable the file cache
+            // this should ensure that no exception in the storage thread will
+            // ever crash the main app. If there is a runtime exception, the thread
+            // will exit (via destroy).
+            LOGGER.log(Level.SEVERE, "Disabling filesystem cache", e);
+            // most likely cause is that the disk is full, just disable the
+            // cache otherwise
+            // more and more exceptions will be thrown.
+            this.destroy();
+            try {
+                lock.writeLock().lock();
+                this.lruCache = new FileWorkingSetCache<String>(0);
+            } finally {
+                lock.writeLock().unlock();
+            }
+        } finally {
+            IOUtils.closeQuietly(outputStream);
+        }
+        return null;
     }
 
 }
