@@ -51,6 +51,10 @@ public class AwtBitmap implements Bitmap {
         this.bufferedImage = bufferedImage;
     }
 
+    public BufferedImage getImage() {
+        return this.bufferedImage;
+    }
+
     @Override
     public void compress(OutputStream outputStream) throws IOException {
         ImageIO.write(this.bufferedImage, "png", outputStream);
